@@ -30,9 +30,11 @@ grow a piece back.
 
 - Docker + NVIDIA Container Toolkit (comment block at the top of `setup.sh`
   links the install guide)
-- The sibling engine checkouts to build the images: `../ninfer` and
-  `../Infernix` (override with `NINFER_BUILD_DIR` / `INFERNIX_BUILD_DIR` in
-  `.env`)
+- The engine source clones to build the images — house convention puts
+  third-party clones under `~/repos` (`~/repos/ninfer`, `~/repos/Infernix`);
+  point `NINFER_BUILD_DIR` / `INFERNIX_BUILD_DIR` at them with absolute
+  paths in `.env` (unset, compose falls back to sibling checkouts
+  `../ninfer` / `../Infernix`)
 - ~20 GB disk for `./models/` (27B), plus ~130 GB NVMe for the Flash-Next
   model if you use the infernix engine
 
