@@ -1,4 +1,4 @@
-"""On-demand benchmark control service for the Qwen3.8-27B vLLM stack.
+"""On-demand benchmark control service for the Qwen3.8-27B inference stack.
 
 Runs benchmarks/context_bench.py as a subprocess, then exposes:
 

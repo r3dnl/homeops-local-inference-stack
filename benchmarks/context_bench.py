@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Context-size benchmark for the Qwen3.8-27B (NVFP4) vLLM deployment.
+"""Context-size benchmark for the Qwen3.8-27B (NVFP4) inference stack.
 
 Measures single-stream performance across context sizes through the
 OpenAI-compatible /v1/chat/completions endpoint:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Concurrent-requests throughput benchmark for the Qwen3.8-27B (NVFP4) vLLM deployment.
+"""Concurrent-requests throughput benchmark for the Qwen3.8-27B (NVFP4) inference stack.
 
 Measures how the stack scales with parallel load through the OpenAI-compatible
 /v1/chat/completions endpoint:
