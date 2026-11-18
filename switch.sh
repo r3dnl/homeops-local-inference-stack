@@ -1,9 +1,24 @@
 #!/usr/bin/env bash
 # switch.sh — switch the engine serving the OpenAI-compatible endpoint on
-# host port 8020: `ninfer` (Qwen3.8-27B NVFP4, default) or `infernix`
-# (Qwen3.8-Flash-Next, a 125B MoE served from system RAM + SSD overflow).
+# host port 8020: `ninfer` (Qwen3.8-27B NVFP4, default), `infernix`
+# (Qwen3.8-Flash-Next, a 125B MoE served from system RAM + SSD overflow),
+# or hand the box over to PolyStrata (github.com/VecSzn/PolyStrata).
 #
-# Usage: ./switch.sh {ninfer|infernix}
+# Usage: ./switch.sh {ninfer|infernix|polystrata [model]}
+#
+# polystrata is not a compose service: it tears the compose stack down,
+# raises the ZFS ARC (PolyStrata streams its GGUF experts through the ARC
+# as its page cache - the Qwen engines must NOT boot against a fat ARC),
+# and execs the run-<model>.sh that PolyStrata's setup wrote. The optional
+# [model] is a regex matched against run-*.sh (newest first), so "glm"
+# starts GLM 5.3 Flash and "dsv4" DeepSeek V4 Flash; the newest run script
+# is the default. Once handed over, model-to-model switching goes through
+# PolyStrata itself (python3 polystrata.py --model <name>) - no teardown,
+# no switch.sh; its server answers on the same port 8020 and, without an
+# api_key in strata-*.json, is open to anything that can reach it - put a
+# gateway in front before exposing it. Coming back is a normal engine
+# switch (./switch.sh ninfer): the PolyStrata server is torn down and the
+# ARC reset automatically.
 #
 # Steps:
 #   1. `docker compose down --remove-orphans` — stop the current stack.
@@ -27,9 +42,9 @@ set -euo pipefail
 
 ENGINE="${1:-}"
 case "${ENGINE}" in
-  ninfer | infernix) ;;
+  ninfer | infernix | polystrata) ;;
   *)
-    echo "usage: $(basename "$0") {ninfer|infernix}" >&2
+    echo "usage: $(basename "$0") {ninfer|infernix|polystrata [model]}" >&2
     exit 2
     ;;
 esac
@@ -45,6 +60,38 @@ fi
 
 # Read one KEY=value line from .env (empty when the key is absent).
 get_env() { grep -E "^$1=" "${ENV_FILE}" | tail -1 | cut -d= -f2- || true; }
+
+# --- PolyStrata side of the switch (not a compose service: `down` cannot reach it) ---
+ZFS_ARC_MAX=/sys/module/zfs/parameters/zfs_arc_max
+# Where PolyStrata lives (the run-*.sh scripts it launches). Resolution:
+# exported POLYSTRATA_DIR > POLYSTRATA_DIR in .env > $HOME/repos/PolyStrata.
+POLY_REPO="${POLYSTRATA_DIR:-$(get_env POLYSTRATA_DIR)}"
+POLY_REPO="${POLY_REPO:-$HOME/repos/PolyStrata}"
+# PolyStrata's own default is 8080; this stack moves it to 8020 so every
+# engine answers one port (the compose stack is down while PolyStrata runs,
+# so nothing competes for it). PolyStrata's setup rewrites its strata-*.json
+# and run-*.sh back to 8080 (with a freshly minted api_key) on a model
+# reinstall - re-apply the 8020/no-key config after reinstalls.
+POLY_PORT=8020
+# ARC budget for PolyStrata's expert arena, in GiB (the 96 GiB source
+# machine uses 76); override with POLY_ARC_GIB in .env.
+POLY_ARC_GIB="$(get_env POLY_ARC_GIB)"; POLY_ARC_GIB="${POLY_ARC_GIB:-76}"
+# Identity check, not just liveness: on the shared 8020 a live /health could
+# equally be the compose engine, and treating that as PolyStrata would stall
+# the revert loop waiting for a server that was never there.
+poly_running() { curl -fsS -m 2 "http://127.0.0.1:${POLY_PORT}/health" 2>/dev/null | grep -q '"service": *"strata"'; }
+
+if [ "$(get_env COMPOSE_PROFILES)" = "polystrata" ]; then
+  if poly_running; then
+    echo "==> stopping PolyStrata server (serve/server.py)"
+    pkill -f "serve/server.py" || true
+    for _ in 1 2 3 4 5 6 7 8 9 10; do poly_running || break; sleep 2; done
+  fi
+  if [ -e "${ZFS_ARC_MAX}" ]; then
+    echo "==> zfs_arc_max -> default (the Qwen engines must not boot against a fat ARC)"
+    echo 0 | sudo tee "${ZFS_ARC_MAX}" >/dev/null
+  fi
+fi
 
 # 1. Stop the current stack (COMPOSE_PROFILES still selects the engine that
 # is currently running, so `down` reaches all of its services).
@@ -70,6 +117,26 @@ if [ -n "${LEFTOVERS}" ]; then
   echo "==> removing containers left behind by the previous engine"
   # shellcheck disable=SC2086
   docker rm -f ${LEFTOVERS}
+fi
+
+# 3b. polystrata: no image to build, no stack to bring up - hand the box over.
+if [ "${ENGINE}" = "polystrata" ]; then
+  if [ -e "${ZFS_ARC_MAX}" ]; then
+    echo "==> zfs_arc_max -> ${POLY_ARC_GIB} GiB (PolyStrata serves its expert arena from the ARC)"
+    echo $((POLY_ARC_GIB * 1024 * 1024 * 1024)) | sudo tee "${ZFS_ARC_MAX}" >/dev/null
+  else
+    echo "==> no ZFS on this host - skipping ARC tuning (PolyStrata streams its experts through the ARC; expect a slower cold path)"
+  fi
+  RUN_SH="$(ls -t "${POLY_REPO}"/run-*.sh 2>/dev/null | grep -m1 -- "${2:-}" || true)"
+  if [ -z "${RUN_SH}" ]; then
+    # ${2:-} not $2: `set -u` would abort this very error line when no model was given.
+    echo "No run-*.sh matching '${2:-<any>}' in ${POLY_REPO} - installed: $(ls -1t "${POLY_REPO}"/run-*.sh 2>/dev/null | xargs -r -n1 basename | sed 's/^run-//; s/\.sh$//' | tr '\n' ' ') (part of a name is enough; install more with PolyStrata's setup)." >&2
+    exit 1
+  fi
+  echo "==> $(basename "${RUN_SH}") - leave this terminal attached: closing it stops the model"
+  echo "    switch installed models: python3 ${POLY_REPO}/polystrata.py --model <name>  |  web: http://127.0.0.1:${POLY_PORT}"
+  echo "    back to the compose engines:  ./switch.sh ninfer   (from another terminal)"
+  exec bash "${RUN_SH}"
 fi
 
 # 4. Bring the stack up on the selected engine.

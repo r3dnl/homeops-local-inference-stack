@@ -41,7 +41,7 @@
 # restart: "unless-stopped" (crash-restart, manual stop stays stopped).
 #
 # Dropped vs the source repo on purpose: the ninfer-custom fork,
-# PolyStrata handover, the caddy gateway, dcgm-exporter,
+# the caddy gateway, dcgm-exporter,
 # the Prometheus/Grafana wiring and the Streamlit bench UI. See README.md.
 
 services:

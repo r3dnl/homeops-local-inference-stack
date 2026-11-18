@@ -10,6 +10,7 @@ Stripped-down, cleaned version of `~/repos/qwen3.8-27b-rtx5090`.
 |---|---|---|
 | [`ninfer`](https://github.com/Neroued/ninfer) (default) | Qwen3.8-27B NVFP4 | single `.ninfer` artifact, ~17 GB |
 | [`infernix`](https://github.com/Wallawalla47/Infernix) | Qwen3.8-Flash-Next (125B MoE) | `.infernix` shards + n-gram volume, ~130 GB |
+| [`polystrata`](https://github.com/VecSzn/PolyStrata) (host mode, not compose) | DeepSeek V4 Flash / GLM 5.3 Flash (GGUF MoE) | streamed through the ZFS ARC |
 
 Both publish host port 8020 with the same OpenAI-compatible API, so clients
 (Pi, Open WebUI, Newelle, …) don't notice a switch. Only one engine runs at
@@ -24,7 +25,8 @@ a time (one GPU).
   mutating the system, and `docker compose config` shows the exact effective
   setup. Rebuild after touching an engine checkout with one `--build`.
 - **`./switch.sh <engine>`**: one command swaps the backend *and* the model
-  it serves (Qwen3.8-27B ↔ Qwen3.8-Flash-Next) behind the same endpoint —
+  it serves (Qwen3.8-27B ↔ Qwen3.8-Flash-Next, or hands the whole box to
+  PolyStrata for DeepSeek/GLM) behind the same endpoint —
   profile flip, clean teardown of the old engine (compose's `down` strands
   inactive-profile containers on the GPU), build-if-missing, and a smoke
   test that waits until `/v1/models` actually answers. Serve-config tweaks
@@ -32,17 +34,23 @@ a time (one GPU).
   keys, so switching model *or* tuning a backend is one edit + one switch —
   no compose edits, and clients never change their URL or key.
 
-## Dropped vs the source repo (on purpose)
+## PolyStrata handover (DeepSeek V4 Flash / GLM 5.3 Flash)
 
-- The **ninfer-custom** fork (a fork variant you don't need on a clean box)
-- **PolyStrata** handover (host-process mode, ZFS ARC tuning)
-- The **caddy gateway**, **dcgm-exporter**, and the Prometheus/Grafana
-  wiring (expose 8020 directly; observability lives in the homeops cluster)
-- The **Streamlit bench UI** — the benchmark service is headless REST,
-  driven from the terminal
-
-Those all still exist in `~/repos/qwen3.8-27b-rtx5090` if you ever need to
-grow a piece back.
+`./switch.sh polystrata [model]` is the third mode — a host process, not a
+compose service. It tears the compose stack down, raises the ZFS ARC
+(PolyStrata streams its GGUF experts through the ARC as its page cache;
+the Qwen engines must not boot against a fat ARC — switching back resets it
+automatically), and runs PolyStrata's `run-<model>.sh`. `[model]` is a
+regex against `run-*.sh`, newest first: `glm` → GLM 5.3 Flash, `dsv4` →
+DeepSeek V4 Flash. Keep that terminal attached — closing it stops the
+model. While handed over, model-to-model switching goes through PolyStrata
+itself (`python3 polystrata.py --model <name>`); its server answers on the
+same port 8020 and, with no api_key configured, is open to anything that
+can reach it — put a gateway in front before exposing it. Coming back:
+`./switch.sh ninfer` from another terminal. Upstream:
+[VecSzn/PolyStrata](https://github.com/VecSzn/PolyStrata); install it with
+PolyStrata's own setup (it writes the `run-<model>.sh` scripts this switch
+launches).
 
 ## Requirements
 
@@ -76,7 +84,8 @@ curl -s http://localhost:8020/v1/models | head   # add -H "Authorization: Bearer
 
 ```sh
 ./switch.sh infernix    # stop 27B, start Flash-Next (first boot reads ~130 GB; up to 40 min)
-./switch.sh ninfer      # back
+./switch.sh ninfer      # back to the quick one
+./switch.sh polystrata glm   # hand the box to PolyStrata (GLM 5.3 Flash; dsv4 for DeepSeek)
 ```
 
 `switch.sh` flips `COMPOSE_PROFILES` in `.env` (the single source of truth),
