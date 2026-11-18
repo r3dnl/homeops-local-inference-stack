@@ -34,8 +34,7 @@ a time (one GPU).
 
 ## Dropped vs the source repo (on purpose)
 
-- The **vLLM** fallback engine and the **ninfer-custom** fork (rollback/fork
-  variants you don't need on a clean box)
+- The **ninfer-custom** fork (a fork variant you don't need on a clean box)
 - **PolyStrata** handover (host-process mode, ZFS ARC tuning)
 - The **caddy gateway**, **dcgm-exporter**, and the Prometheus/Grafana
   wiring (expose 8020 directly; observability lives in the homeops cluster)
