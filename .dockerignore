@@ -1,0 +1,13 @@
+# Keep the build context minimal and secrets out of images
+.git
+.gitignore
+.dockerignore
+.env
+.env.example
+
+# Build-time inputs that are not part of the image
+models/
+.venv_download/
+
+# Repo metadata
+README.md

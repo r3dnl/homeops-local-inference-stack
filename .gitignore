@@ -1,0 +1,27 @@
+# Model weights (downloaded by setup.sh, ~20 GB)
+models/*
+!models/qwen3.8-27b-nvfp4/
+models/qwen3.8-27b-nvfp4/*
+!models/qwen3.8-27b-nvfp4/.gitkeep
+
+# Python virtual environments (local build artifacts)
+.venv_download/
+__pycache__/
+*.pyc
+
+# Local secrets / per-machine configuration
+.env
+
+# Benchmark run artifacts (machine-specific; host and bench container
+# both write here)
+benchmarks/results/*
+!benchmarks/results/.gitkeep
+
+# Agent runtime state
+.pi/
+
+# Editor and OS noise
+.vscode/
+.idea/
+.DS_Store
+*.swp

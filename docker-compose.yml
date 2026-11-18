@@ -1,0 +1,243 @@
+# docker-compose.yml
+#
+# Stripped-down local inference stack (from ~/repos/qwen3.8-27b-rtx5090):
+# two switchable engine services + one terminal-only benchmark service.
+# Only one engine runs at a time (one GPU). Both publish the same host
+# port (8020) with an OpenAI-compatible API, so clients don't notice a
+# switch.
+#
+# Engine selection is a compose profile in .env (single source of truth):
+#
+#   COMPOSE_PROFILES=ninfer    # the ninfer service (Qwen3.8-27B NVFP4)
+#                              # + the bench service
+#   COMPOSE_PROFILES=infernix  # the infernix service (Qwen3.8-Flash-Next,
+#                              # a 125B MoE; no bench variant)
+#
+# `./switch.sh <engine>` flips the line and does down + leftover cleanup +
+# up + smoke test for you. Only one engine runs at a time (one GPU).
+#
+# Model selection comes from .env (see .env.example); unset keys keep the
+# defaults, which serve the stock Qwen3.8-27B NVFP4 model:
+#   MODEL_SUBDIR        tokenizer dir under ./models/ (setup.sh downloads it)
+#   NINFER_ARTIFACT     the .ninfer engine artifact under ./models/
+#   SERVED_MODEL_NAME   value for --model-id
+#   NINFER_API_KEY      bearer / x-api-key value, empty = no auth
+#   NINFER_HOST_PORT    host port for the engine API (default 8020)
+#
+# NInfer performance flags (ninfer-serve command) are .env-overridable:
+#   NINFER_MAX_CONTEXT      --max-context (this file: 262144, full native context)
+#   NINFER_MAX_CONCURRENCY  --max-concurrency (this file: 8, the engine's cap)
+#   NINFER_KV_DTYPE         --kv-dtype (this file: fp8)
+#   NINFER_DRAFT_TOKENS     --draft-tokens for --spec mtp (this file: 3)
+# The shipped profile is the dedicated-card max-performance tuning and
+# assumes a dedicated card (nothing else on the GPU, no display on it).
+#
+# The NInfer runtime image builds from the sibling NInfer checkout
+# (${NINFER_BUILD_DIR:-../ninfer}); the first `up --build` compiles the
+# C++/CUDA engine, which is a slow one-time step.
+#
+# Fixed container names (ninfer, infernix, bench) so `docker logs <name>`
+# / `docker restart <name>` work either way. All services use
+# restart: "unless-stopped" (crash-restart, manual stop stays stopped).
+#
+# Dropped vs the source repo on purpose: the vLLM fallback engine, the
+# ninfer-custom fork, PolyStrata handover, the caddy gateway, dcgm-exporter,
+# the Prometheus/Grafana wiring and the Streamlit bench UI. See README.md.
+
+services:
+  ninfer:
+    # Default engine (COMPOSE_PROFILES=ninfer; switch with ./switch.sh infernix).
+    # NInfer runtime image (CUDA, prebuilt engine binaries): built from the
+    # sibling NInfer checkout — override NINFER_BUILD_DIR in .env if it lives
+    # elsewhere. First build compiles the C++/CUDA engine (one-time).
+    profiles: ["ninfer"]
+    build:
+      context: ${NINFER_BUILD_DIR:-../ninfer}
+      dockerfile: Dockerfile
+    container_name: ${CONTAINER_NAME:-ninfer}
+    restart: "unless-stopped"
+    # Host port 8020 (NINFER_HOST_PORT) is the direct OpenAI-compatible API
+    # (OpenAI /v1/* plus /health; bearer or x-api-key auth = NINFER_API_KEY;
+    # open when the key is empty).
+    volumes:
+      # NInfer artifact (single .ninfer file) + tokenizer dir for the bench
+      # service, both downloaded by setup.sh, mounted read-only
+      - ./models:/models:ro
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      # Bearer / x-api-key value — from .env, leave empty to disable auth
+      - NINFER_API_KEY=${NINFER_API_KEY:-}
+    ports:
+      # NINFER_HOST_PORT from .env (default 8020); container port stays 8080
+      - "${NINFER_HOST_PORT:-8020}:8080"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1 # single GPU
+              capabilities: [gpu]
+    # Shipped profile: dedicated-card max performance — full 256K context,
+    # 8 active lanes (the engine's cap), FP8 KV, MTP3 speculative decode +
+    # optimized proposal head, thinking preserved across turns. Clients
+    # beyond the 8 active lanes queue on the bounded FIFO ingress (429 past
+    # the bound).
+    command:
+      - ninfer-serve
+      - /models/${NINFER_ARTIFACT:-qwen3_8_27b_nvfp4.ninfer}
+      - --host
+      - 0.0.0.0
+      - --model-id
+      - ${SERVED_MODEL_NAME:-qwen3.8-27b}
+      - --api-key
+      - ${NINFER_API_KEY:-}
+      - --max-context
+      - "${NINFER_MAX_CONTEXT:-262144}"
+      - --kv-capacity
+      - auto
+      - --max-concurrency
+      - "${NINFER_MAX_CONCURRENCY:-8}"
+      - --kv-dtype
+      - ${NINFER_KV_DTYPE:-fp8}
+      - --spec
+      - mtp
+      - --draft-tokens
+      - "${NINFER_DRAFT_TOKENS:-3}"
+      - --lm-head-draft
+      - --preserve-thinking
+
+  # Infernix engine service — serves Qwen3.8-Flash-Next in the NVIDIA NVFP4
+  # Dense8 conversion (COMPOSE_PROFILES=infernix; ./switch.sh infernix).
+  # NVFP4 experts pinned in system RAM with SSD-tier overflow, VRAM expert
+  # cache, n-gram table on NVMe, hybrid prefix cache (GPU / host / file),
+  # 1-8 concurrent requests with preemption. The model is a one-time manual
+  # download (NOT fetched by setup.sh) — see .env.example. The runtime image
+  # ships only the engine binaries, so the maintained Qwen3.8 chat template
+  # is mounted from the Infernix checkout.
+  infernix:
+    profiles: ["infernix"]
+    build:
+      context: ${INFERNIX_BUILD_DIR:-../Infernix}
+      dockerfile: Dockerfile
+    container_name: ${CONTAINER_NAME:-infernix}
+    restart: "unless-stopped"
+    volumes:
+      # Flash-Next model: shards + n-gram volume, mounted read-only
+      - ${INFERX_MODELS_DIR:-/mnt/zdata/ai-models/infernix}:/models:ro
+      # n-gram volume in its own dataset (recordsize=8k, compression=off,
+      # primarycache=metadata): its data stays out of the ARC and reads land
+      # at 8K granularity. REQUIRES the empty host dir
+      # <INFERX_MODELS_DIR>/ngram: runc resolves nested mountpoints through
+      # the already-applied :ro /models bind, so a missing mountpoint dir
+      # fails container init with EROFS. Do not delete that dir.
+      - ${INFERX_NGRAM_DIR:-/mnt/zdata/ai-models/ngram}:/models/ngram:ro
+      # File tier of the hybrid prefix cache (survives container recreation)
+      - infernix_prefix_cache:/cache
+      # Maintained Qwen3.8 chat template — the image has no bundled template
+      # dir, so --chat-template needs a real in-container path
+      - ${INFERNIX_BUILD_DIR:-../Infernix}/tools/chat_templates:/templates:ro
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    ports:
+      # NINFER_HOST_PORT from .env (default 8020); container port stays 8080
+      - "${NINFER_HOST_PORT:-8020}:8080"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1 # single GPU
+              capabilities: [gpu]
+    # Flash-Next tuning, from the Dense8 model card: int8 KV, MTP drafting
+    # (the model's own drafter), prefill chunking, the maintained Qwen3.8
+    # chat template (keeps agent-harness system messages valid at every
+    # turn).
+    command:
+      - infernix-serve
+      - /models/${INFERX_ARTIFACT:-Qwen3.8-Flash-Next-NVIDIA-NVFP4-Dense8-Infernix-00001-of-00003.infernix}
+      - --ngram-volume
+      - /models/${INFERX_NGRAM_VOLUME:-Qwen3.8-Flash-Next-NVIDIA-NVFP4-Infernix.ngram}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --model-id
+      - ${INFERX_MODEL_ID:-qwen3.8-flash-next}
+      - --max-context
+      - "${INFERX_MAX_CONTEXT:-262144}"
+      # KV pool ceiling (tokens across ALL lanes). 524288 = 2 full-context
+      # lanes; the rest queues FIFO. Without a cap (auto) the pool grows by
+      # taking VRAM from the expert cache, which starves the expert cache
+      # and pushes expert misses onto the SSD/CPU path.
+      - --kv-capacity
+      - "${INFERX_KV_CAPACITY:-524288}"
+      - --max-concurrency
+      - "${INFERX_MAX_CONCURRENCY:-8}"
+      - --kv-dtype
+      - ${INFERX_KV_DTYPE:-int8}
+      - --prefill-chunk
+      - "4096"
+      - --spec
+      - mtp
+      - --draft-tokens
+      - "4"
+      - --lm-head-draft
+      - --chat-template
+      - /templates/qwen3_8.jinja
+      - --prefix-cache-file
+      - /cache/prefix-cache.bin
+      - --prefix-cache-save-mins
+      - "5"
+      # Expert-cache state: the engine saves it next to the artifact by
+      # default, but /models is :ro by design -> persistence error spam +
+      # a cold expert cache on every restart. Persist it on the writable
+      # cache volume instead.
+      - --expert-state
+      - /cache/expert-state.bin
+      # Reserve host RAM for the desktop + page cache; the engine pins the
+      # rest of its expert pool and tiers cold experts to SSD. Do not go
+      # below 8192 on a desktop host — a smaller reserve destabilised the
+      # source box (headroom is a one-way ratchet: pinned experts are never
+      # released).
+      - --ram-headroom-mib
+      - "${INFERX_RAM_HEADROOM_MIB:-8192}"
+
+  # On-demand benchmark control service (benchmarks/) — terminal-only:
+  # a headless REST API on loopback, no web UI (the source repo's Streamlit
+  # service was dropped). Idle-safe: autostarts with the stack but touches
+  # the GPU only while a run is in flight — it just issues OpenAI-API
+  # requests to the engine over the docker network. Runs
+  # benchmarks/context_bench.py as a subprocess (single-flight). API:
+  # GET /status, POST /bench, GET /runs, GET /metrics (see
+  # benchmarks/server.py docstring; OpenAPI docs at /docs).
+  bench:
+    profiles: ["ninfer"]
+    build:
+      context: .
+      dockerfile: benchmarks/Dockerfile
+    container_name: bench
+    restart: "unless-stopped"
+    environment:
+      # Engine endpoint on the docker network (no host port involved)
+      - BENCH_BASE_URL=http://ninfer:8080
+      # The suite needs some credential; with NINFER_API_KEY unset the
+      # keyless endpoint accepts any non-empty bearer placeholder
+      - BENCH_API_KEY=${NINFER_API_KEY:-no-key}
+      - BENCH_MODEL=${SERVED_MODEL_NAME:-qwen3.8-27b}
+      - BENCH_TIMEOUT_S=${BENCH_TIMEOUT_S:-600}
+    volumes:
+      # Tokenizer files for token-accurate padding (setup.sh downloads just
+      # the tokenizer into this dir)
+      - ./models/${MODEL_SUBDIR:-qwen3.8-27b-nvfp4}:/app/models/${MODEL_SUBDIR:-qwen3.8-27b-nvfp4}:ro
+      # Benchmark results: run reports + run index, shared with local runs
+      # (host-side files under benchmarks/results/, gitignored)
+      - ./benchmarks/results:/app/benchmarks/results
+    ports:
+      # Loopback-only
+      - "127.0.0.1:${BENCH_HOST_PORT:-8040}:8040"
+    depends_on:
+      - ninfer
+
+volumes:
+  # Infernix: file tier of the hybrid prefix cache (survives container recreation)
+  infernix_prefix_cache:
