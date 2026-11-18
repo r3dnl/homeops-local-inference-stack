@@ -1,17 +1,36 @@
-# homeops-local-inference-stack
+# My local inference compose stack for Ninfer/Infernix on RTX5090
 
-A minimal local inference stack: one GPU, two switchable engines, one
-OpenAI-compatible endpoint on port **8020**, plus a terminal-only benchmark
-service. Stripped-down, cleaned version of `~/repos/qwen3.8-27b-rtx5090`.
+A minimal local inference stack: one GPU, two switchable engines —
+[NInfer](https://github.com/Neroued/ninfer) and
+[Infernix](https://github.com/Wallawalla47/Infernix) — one OpenAI-compatible
+endpoint on port **8020**, plus a terminal-only benchmark service.
+Stripped-down, cleaned version of `~/repos/qwen3.8-27b-rtx5090`.
 
 | Engine (compose profile) | Model served | Format |
 |---|---|---|
-| `ninfer` (default) | Qwen3.8-27B NVFP4 | single `.ninfer` artifact, ~17 GB |
-| `infernix` | Qwen3.8-Flash-Next (125B MoE) | `.infernix` shards + n-gram volume, ~130 GB |
+| [`ninfer`](https://github.com/Neroued/ninfer) (default) | Qwen3.8-27B NVFP4 | single `.ninfer` artifact, ~17 GB |
+| [`infernix`](https://github.com/Wallawalla47/Infernix) | Qwen3.8-Flash-Next (125B MoE) | `.infernix` shards + n-gram volume, ~130 GB |
 
 Both publish host port 8020 with the same OpenAI-compatible API, so clients
 (Pi, Open WebUI, Newelle, …) don't notice a switch. Only one engine runs at
 a time (one GPU).
+
+## Why this shape
+
+- **Docker Compose**: the whole stack — engine, benchmark service, model
+  mounts, GPU reservation, ports — is one declarative file. `docker compose
+  up -d` brings it up on any box with Docker + the NVIDIA container toolkit;
+  `down` takes it all out. No host Python environments, no install scripts
+  mutating the system, and `docker compose config` shows the exact effective
+  setup. Rebuild after touching an engine checkout with one `--build`.
+- **`./switch.sh <engine>`**: one command swaps the backend *and* the model
+  it serves (Qwen3.8-27B ↔ Qwen3.8-Flash-Next) behind the same endpoint —
+  profile flip, clean teardown of the old engine (compose's `down` strands
+  inactive-profile containers on the GPU), build-if-missing, and a smoke
+  test that waits until `/v1/models` actually answers. Serve-config tweaks
+  (context length, concurrency, KV dtype, draft tokens) are plain `.env`
+  keys, so switching model *or* tuning a backend is one edit + one switch —
+  no compose edits, and clients never change their URL or key.
 
 ## Dropped vs the source repo (on purpose)
 
